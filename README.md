@@ -1,5 +1,5 @@
 # Polaris AI - RAG-Powered Meeting Assistant
-
+### Submission By team C0xFFEE OverFlow for the Murf Coding Challenge 4
 <img width="1029" height="590" alt="image" src="https://github.com/user-attachments/assets/a3d8247d-6b5b-4afc-9381-9a742a257f13" />
 
 ## 📌 Overview
