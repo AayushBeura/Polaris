@@ -1,5 +1,7 @@
 # Polaris AI - RAG-Powered Meeting Assistant
 
+<img width="1029" height="590" alt="image" src="https://github.com/user-attachments/assets/a3d8247d-6b5b-4afc-9381-9a742a257f13" />
+
 ## 📌 Overview
 Polaris AI is an intelligent **meeting assistant** that integrates **Recall.ai**, **Cerebras**, and **Murf AI** to provide real-time meeting support.  
 It can:
@@ -32,8 +34,8 @@ It can:
 
 ### 1. Clone Repository
 ```bash
-git clone <repo_url>
-cd polaris-ai
+git clone https://github.com/AayushBeura/Polaris.git
+cd Polaris
 ```
 
 ### 2. Install Dependencies
@@ -73,7 +75,8 @@ Ngrok tunneling is available for external meeting connections.
 ---
 
 ## 🔄 Workflow
-(Insert Flowchart Here)
+
+![flowchart-polaris](https://github.com/user-attachments/assets/3065aa81-6203-476d-8de8-1539868bb057)
 
 ---
 
