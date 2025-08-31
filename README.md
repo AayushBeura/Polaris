@@ -53,7 +53,17 @@ Polaris requires three API keys. Store them in `user_config.json`:
 }
 ```
 
-### 4. Run Application
+### 4. Set up Ngrok (for secure tunneling)
+Polaris uses **ngrok** to create a public HTTPS tunnel for meeting connections.
+
+1. Sign up at [ngrok](https://ngrok.com/) and get your auth token.
+2. Set your auth token (replace `YOUR_TOKEN` with your actual key):
+```bash
+ngrok config add-authtoken YOUR_TOKEN
+```
+3. Polaris will use ngrok automatically when starting a meeting tunnel.
+
+### 5. Run Application
 ```bash
 python polaris.py
 ```
