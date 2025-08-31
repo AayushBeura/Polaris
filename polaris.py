@@ -46,7 +46,6 @@ RECALL_API_KEY = config.get("RECALL_API_KEY")
 CEREBRAS_API_KEY = config.get("CEREBRAS_API_KEY")
 MURF_API_KEY = config.get("MURF_API_KEY")
 
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'polaris-meeting-bot'
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -79,7 +78,6 @@ def set_api_keys():
     })
 
     return jsonify({"success": True})
-
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -134,14 +132,14 @@ voice_options = [
     ("Grace (UK Female)", "en-UK-grace"),
     ("Ryan (US Male)", "en-US-ryan")
 ]
-selected_voice_id = "en-US-marcus"  # Default value; you can initialize this globally
 
+selected_voice_id = "en-US-marcus"  # Default value
 
 # MOM generation functions
 def prepare_mom_prompt_exact(full_transcript):
     today = date.today().strftime("%Y-%m-%d")
     transcript_text = "\n".join([entry['text'] for entry in full_transcript])
-    
+
     date_pattern = re.compile(r'\b(\d{4}-\d{2}-\d{2})\b')
     match = date_pattern.search(transcript_text)
     if match:
@@ -162,36 +160,36 @@ def generate_mom_pdf_exact(mom_content, filename="meeting_minutes.pdf"):
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    
+
     cleaned_text = mom_content.encode('latin-1', 'ignore').decode('latin-1')
-    
+
     if cleaned_text.strip():
         pdf.multi_cell(0, 10, cleaned_text)
     else:
         pdf.multi_cell(0, 10, "Error: No valid content to display.")
-    
+
     pdf_bytes = pdf.output(dest="S").encode('latin-1')
     return pdf_bytes
 
 async def generate_meeting_summary_fixed():
     global full_meeting_transcript, generated_mom_file
-    
+
     if not full_meeting_transcript:
         print("❌ No meeting transcript to summarize")
         return None, None
-    
+
     try:
         print("📝 Generating MOM...")
         mom_prompt = prepare_mom_prompt_exact(full_meeting_transcript)
-        
+
         def generate_mom_exact():
             headers = {
                 'Authorization': f'Bearer {CEREBRAS_API_KEY}',
                 'Content-Type': 'application/json'
             }
-            
+
             payload = {
-                'model': 'llama-4-scout-17b-16e-instruct',
+                'model': 'llama3.1-8b',
                 'messages': [
                     {
                         'role': 'system',
@@ -206,41 +204,41 @@ async def generate_meeting_summary_fixed():
                 'temperature': 0.2,
                 'top_p': 0.9
             }
-            
+
             response = session.post(
                 'https://api.cerebras.ai/v1/chat/completions',
                 json=payload,
                 headers=headers,
                 timeout=12
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
                 return result['choices'][0]['message']['content'].strip()
             else:
                 print(f"❌ MOM generation error: {response.status_code}")
                 return None
-        
+
         loop = asyncio.get_event_loop()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         mom_content = await loop.run_in_executor(executor, generate_mom_exact)
-        
+
         if mom_content:
             pdf_bytes = generate_mom_pdf_exact(mom_content)
             if pdf_bytes:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 pdf_filename = f"meeting_minutes_{timestamp}.pdf"
                 pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], pdf_filename)
-                
+
                 with open(pdf_path, 'wb') as f:
                     f.write(pdf_bytes)
-                
+
                 generated_mom_file = pdf_filename
                 print(f"✅ MOM generated: {pdf_filename}")
                 return mom_content, pdf_filename
-            
+
         return None, None
-        
+
     except Exception as e:
         print(f"❌ MOM generation error: {e}")
         return None, None
@@ -248,23 +246,23 @@ async def generate_meeting_summary_fixed():
 # Bot leave function
 def leave_bot():
     global current_bot_id, bot_startup_state, conversation_memory, full_meeting_transcript
-    
+
     if not current_bot_id:
         print("❌ No active bot to leave")
         return False, "No active bot found"
-    
+
     try:
         url = f"https://us-west-2.recall.ai/api/v1/bot/{current_bot_id}/leave_call/"
         headers = {
             'Authorization': f'Token {RECALL_API_KEY}',
             'Accept': 'application/json'
         }
-        
+
         response = session.post(url, headers=headers, timeout=8)
-        
+
         if response.status_code == 200:
             print(f"✅ Bot {current_bot_id} left meeting successfully")
-            
+
             def generate_summary_async():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -276,9 +274,9 @@ def leave_bot():
                         'message': "📝 MOM generated! Download available."
                     })
                 loop.close()
-            
+
             threading.Thread(target=generate_summary_async, daemon=True).start()
-            
+
             current_bot_id = None
             bot_startup_state = {
                 'is_joining': False,
@@ -287,13 +285,13 @@ def leave_bot():
                 'countdown_timer': None,
                 'greeting_sent': False
             }
-            
+
             conversation_memory = []
             return True, "Bot left meeting successfully"
         else:
             print(f"❌ Failed to leave meeting: {response.text}")
             return False, f"Leave failed: {response.text}"
-            
+
     except Exception as e:
         print(f"❌ Error leaving bot: {e}")
         return False, str(e)
@@ -302,166 +300,434 @@ def check_polaris_mention(text):
     """IMPROVED: Better Polaris detection with context awareness"""
     if not text or not text.strip():
         return False
-    
+
     words = text.strip().split()
     first_three = words[:3] if len(words) >= 3 else words
-    
+
     for word in first_three:
         clean_word = re.sub(r'[^\w]', '', word.lower())
         if clean_word == 'polaris':
             return True
-    
+
     return False
 
-# FIXED RAG SYSTEM
-class PolarisRAG:
+# FULLY FIXED RAG SYSTEM - COMBINING BEST OF BOTH
+class DocumentProcessor:
     def __init__(self):
-        print("🧭 Initializing FIXED Polaris RAG system...")
-        
+        print("🧭 Initializing COMPLETELY FIXED RAG system...")
+
+        # Initialize sentence transformer with optimal settings
         self.encoder = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-        self.encoder.max_seq_length = 128
-        
+        self.encoder.max_seq_length = 384  # Increased for better context
+
+        # CRITICAL FIX: Use L2 distance for proper cosine similarity
         self.dimension = 384
-        self.index = faiss.IndexFlatIP(self.dimension)
-        
-        # Document management
+        self.index = faiss.IndexFlatL2(self.dimension)  # FIXED: L2 instead of IP
+
+        # Document storage
         self.documents = []
         self.document_metadata = []
         self.document_files = {}
-        self.embedding_cache = {}
         self.search_cache = {}
-        
-        self.sentence_splitter = re.compile(r'[.!?]+\s+')
+
+        # Enhanced text processing
+        self.sentence_splitter = re.compile(r'[.!?]+\s+|\n\s*\n')
         self.cleanup_regex = re.compile(r'\s+')
-        
-        print("✅ FIXED Polaris RAG system ready!")
+
+        print("✅ COMPLETELY FIXED RAG system ready!")
+
+    def clean_text(self, text):
+        """Enhanced text cleaning"""
+        if not text:
+            return ""
+
+        # Remove non-printable characters
+        text = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', text)
+
+        # Normalize whitespace
+        text = self.cleanup_regex.sub(' ', text)
+
+        # Remove excessive punctuation
+        text = re.sub(r'[.]{3,}', '...', text)
+        text = re.sub(r'[-]{3,}', '---', text)
+
+        return text.strip()
+
+    def split_text(self, text, max_length=500, overlap=80):
+        """FIXED: Enhanced text splitting with better overlap"""
+        if not text or not text.strip():
+            return []
+
+        text = self.clean_text(text)
+        if not text:
+            return []
+
+        chunks = []
+
+        # Split by sentences and paragraphs
+        sentences = self.sentence_splitter.split(text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        if not sentences:
+            return []
+
+        current_chunk = ""
+
+        for sentence in sentences:
+            # If adding this sentence would exceed max_length
+            if len(current_chunk) + len(sentence) + 1 > max_length:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+
+                    # Create overlap from the end of current chunk
+                    words = current_chunk.split()
+                    overlap_words = words[-min(overlap//6, len(words)):]
+                    current_chunk = " ".join(overlap_words)
+
+                    # If the sentence itself is very long, split it
+                    if len(sentence) > max_length:
+                        sentence_words = sentence.split()
+                        for i in range(0, len(sentence_words), max_length//10):
+                            chunk_words = sentence_words[i:i + max_length//10]
+                            chunk_text = " ".join(chunk_words)
+                            if chunk_text.strip():
+                                chunks.append(chunk_text.strip())
+                        current_chunk = ""
+                    else:
+                        current_chunk = (current_chunk + " " + sentence).strip()
+                else:
+                    # Very long sentence, split it
+                    if len(sentence) > max_length:
+                        words = sentence.split()
+                        for i in range(0, len(words), max_length//10):
+                            chunk_words = words[i:i + max_length//10]
+                            chunk_text = " ".join(chunk_words)
+                            if chunk_text.strip():
+                                chunks.append(chunk_text.strip())
+                    else:
+                        current_chunk = sentence
+            else:
+                current_chunk = (current_chunk + " " + sentence).strip() if current_chunk else sentence
+
+        # Add the final chunk
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        # Enhanced filtering - keep chunks with meaningful content
+        filtered_chunks = []
+        for chunk in chunks:
+            # Remove chunks that are too short or just punctuation/numbers
+            if len(chunk.strip()) >= 50 and re.search(r'[a-zA-Z]{3,}', chunk):
+                filtered_chunks.append(chunk)
+
+        print(f"📄 Text chunking: {len(sentences)} sentences → {len(chunks)} chunks → {len(filtered_chunks)} filtered chunks")
+        return filtered_chunks
 
     def process_pdf(self, file_path):
+        """ENHANCED PDF processing with better error handling"""
         try:
             chunks = []
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
                 text = ""
-                for page in pdf_reader.pages:
-                    page_text = page.extract_text()
-                    page_text = self.cleanup_regex.sub(' ', page_text)
-                    text += page_text + "\n"
-                    
-            chunks = self.smart_chunk_text(text, max_length=300, overlap=50)
+
+                for page_num, page in enumerate(pdf_reader.pages):
+                    try:
+                        page_text = page.extract_text()
+                        if page_text:
+                            cleaned_text = self.clean_text(page_text)
+                            if cleaned_text:
+                                text += cleaned_text + "\n\n"
+                    except Exception as e:
+                        print(f"⚠️ Warning: Error processing page {page_num + 1}: {e}")
+                        continue
+
+            if not text.strip():
+                print("❌ No text extracted from PDF")
+                return []
+
+            chunks = self.split_text(text, max_length=500, overlap=80)
+            print(f"📄 PDF processed: {len(pdf_reader.pages)} pages → {len(text)} chars → {len(chunks)} chunks")
             return chunks
+
         except Exception as e:
             print(f"❌ PDF processing error: {e}")
             return []
 
     def process_docx(self, file_path):
+        """ENHANCED DOCX processing"""
         try:
             doc = docx.Document(file_path)
             text = ""
+
+            # Process paragraphs
             for paragraph in doc.paragraphs:
                 para_text = paragraph.text.strip()
                 if para_text:
-                    text += para_text + "\n"
-                    
-            chunks = self.smart_chunk_text(text, max_length=300, overlap=50)
+                    cleaned_para = self.clean_text(para_text)
+                    if cleaned_para:
+                        text += cleaned_para + "\n\n"
+
+            # Process tables if any
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = " | ".join([cell.text.strip() for cell in row.cells])
+                    if row_text.strip():
+                        cleaned_row = self.clean_text(row_text)
+                        if cleaned_row:
+                            text += cleaned_row + "\n"
+                text += "\n"
+
+            if not text.strip():
+                print("❌ No text extracted from DOCX")
+                return []
+
+            chunks = self.split_text(text, max_length=500, overlap=80)
+            print(f"📄 DOCX processed: {len(text)} chars → {len(chunks)} chunks")
             return chunks
+
         except Exception as e:
             print(f"❌ DOCX processing error: {e}")
             return []
 
     def process_txt(self, file_path):
+        """ENHANCED TXT processing with encoding detection"""
         try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                text = file.read()
-                
-            text = self.cleanup_regex.sub(' ', text)
-            chunks = self.smart_chunk_text(text, max_length=300, overlap=50)
+            # Try different encodings
+            encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
+            text = None
+
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as file:
+                        text = file.read()
+                    print(f"✅ Successfully read file with {encoding} encoding")
+                    break
+                except UnicodeDecodeError:
+                    continue
+
+            if text is None:
+                print("❌ Could not read file with any encoding")
+                return []
+
+            text = self.clean_text(text)
+            if not text:
+                print("❌ No valid text after cleaning")
+                return []
+
+            chunks = self.split_text(text, max_length=500, overlap=80)
+            print(f"📄 TXT processed: {len(text)} chars → {len(chunks)} chunks")
             return chunks
+
         except Exception as e:
             print(f"❌ TXT processing error: {e}")
             return []
 
-    def smart_chunk_text(self, text, max_length=300, overlap=50):
-        if not text.strip():
-            return []
-
-        chunks = []
-        sentences = self.sentence_splitter.split(text)
-
-        current_chunk = ""
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-
-            if len(current_chunk) + len(sentence) > max_length:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                    words = current_chunk.split()
-                    overlap_words = words[-min(10, len(words)):]
-                    current_chunk = " ".join(overlap_words) + " " + sentence
-                else:
-                    words = sentence.split()
-                    for i in range(0, len(words), max_length // 6):
-                        chunk_words = words[i:i + max_length // 6]
-                        chunks.append(" ".join(chunk_words))
-                    current_chunk = ""
-            else:
-                current_chunk += " " + sentence if current_chunk else sentence
-
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        return [chunk for chunk in chunks if len(chunk.strip()) > 30]
-
     def add_document(self, filename, chunks):
+        """FIXED: Enhanced document addition with proper validation"""
         try:
-            print(f"🧭 Processing {len(chunks)} chunks from {filename}...")
-            
+            print(f"📚 Processing {len(chunks)} chunks from {filename}...")
+
             if not chunks:
+                print("❌ No chunks to add")
                 return False
-                
-            embeddings = self.encoder.encode(chunks, batch_size=64, show_progress_bar=False)
-            embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-            
-            self.index.add(embeddings.astype('float32'))
-            
+
+            # Validate chunks
+            valid_chunks = []
+            for chunk in chunks:
+                if isinstance(chunk, str) and len(chunk.strip()) >= 50:
+                    valid_chunks.append(chunk.strip())
+
+            if not valid_chunks:
+                print("❌ No valid chunks after filtering")
+                return False
+
+            print(f"📊 Valid chunks: {len(valid_chunks)} out of {len(chunks)}")
+
+            # CRITICAL FIX: Generate embeddings with proper normalization
+            try:
+                embeddings = self.encoder.encode(
+                    valid_chunks, 
+                    batch_size=32,
+                    show_progress_bar=False,
+                    convert_to_tensor=False
+                )
+
+                # FIXED: Proper normalization for L2 distance
+                embeddings = embeddings.astype(np.float32)
+                norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+                norms[norms == 0] = 1  # Avoid division by zero
+                embeddings = embeddings / norms
+
+                print(f"📊 Generated embeddings shape: {embeddings.shape}")
+
+            except Exception as e:
+                print(f"❌ Embedding generation error: {e}")
+                return False
+
+            # Add to FAISS index
+            try:
+                self.index.add(embeddings)
+                print(f"📊 Added embeddings to FAISS index. Total vectors: {self.index.ntotal}")
+            except Exception as e:
+                print(f"❌ FAISS index error: {e}")
+                return False
+
+            # Update document storage
             start_idx = len(self.documents)
-            for i, chunk in enumerate(chunks):
+            for i, chunk in enumerate(valid_chunks):
                 self.documents.append(chunk)
                 self.document_metadata.append({
                     'filename': filename,
                     'chunk_id': len(self.documents) - 1,
                     'chunk_index': i,
                     'length': len(chunk),
-                    'content_preview': chunk[:100] + "..." if len(chunk) > 100 else chunk
+                    'content_preview': chunk[:100] + "..." if len(chunk) > 100 else chunk,
+                    'word_count': len(chunk.split())
                 })
-            
+
             self.document_files[filename] = {
-                'chunk_count': len(chunks),
-                'chunk_indices': list(range(start_idx, start_idx + len(chunks))),
-                'upload_time': datetime.now().isoformat()
+                'chunk_count': len(valid_chunks),
+                'chunk_indices': list(range(start_idx, start_idx + len(valid_chunks))),
+                'upload_time': datetime.now().isoformat(),
+                'total_chars': sum(len(chunk) for chunk in valid_chunks),
+                'avg_chunk_length': sum(len(chunk) for chunk in valid_chunks) // len(valid_chunks)
             }
-            
+
+            # Clear search cache
             self.search_cache.clear()
-            print(f"✅ Added {len(chunks)} chunks from {filename}")
+            print(f"✅ Added {len(valid_chunks)} chunks from {filename}")
+            print(f"📊 Total documents: {len(self.document_files)}, Total chunks: {len(self.documents)}")
             return True
-            
+
         except Exception as e:
             print(f"❌ Document addition error: {e}")
             return False
 
+    def search(self, query, top_k=5):
+        """COMPLETELY FIXED: Proper search with L2 distance and cosine similarity"""
+        try:
+            # Input validation
+            if not query or not query.strip():
+                print("❌ Empty query")
+                return []
+
+            query = query.strip()
+            cache_key = hashlib.md5(f"{query}_{top_k}".encode()).hexdigest()
+
+            if cache_key in self.search_cache:
+                print(f"⚡ Cache hit for query: '{query[:50]}...'")
+                return self.search_cache[cache_key]
+
+            if len(self.documents) == 0:
+                print("❌ No documents in RAG system")
+                return []
+
+            print(f"🔍 Searching {len(self.documents)} chunks for: '{query[:50]}...'")
+
+            # Generate query embedding
+            try:
+                query_embedding = self.encoder.encode(
+                    [query], 
+                    show_progress_bar=False,
+                    convert_to_tensor=False
+                )
+                query_embedding = query_embedding.astype(np.float32)
+
+                # Normalize for cosine similarity
+                norm = np.linalg.norm(query_embedding, axis=1, keepdims=True)
+                if norm[0] > 0:
+                    query_embedding = query_embedding / norm
+                else:
+                    print("❌ Query embedding has zero norm")
+                    return []
+
+            except Exception as e:
+                print(f"❌ Query embedding error: {e}")
+                return []
+
+            # FIXED: Search with better parameters
+            search_k = min(top_k * 2, len(self.documents))
+
+            try:
+                # L2 distance search
+                distances, indices = self.index.search(query_embedding, search_k)
+
+                # Convert L2 distances to cosine similarities
+                # For normalized vectors: cosine_sim = 1 - (L2_dist^2 / 2)
+                similarities = 1 - (distances[0] ** 2) / 2
+
+            except Exception as e:
+                print(f"❌ FAISS search error: {e}")
+                return []
+
+            results = []
+            for similarity, idx in zip(similarities, indices[0]):
+                if idx < len(self.documents):
+                    # CRITICAL FIX: Much lower threshold for better recall
+                    if similarity > 0.1:  # Lowered from 0.3 to 0.1
+                        chunk_text = self.documents[idx]
+
+                        # Additional relevance scoring
+                        query_words = set(query.lower().split())
+                        chunk_words = set(chunk_text.lower().split())
+                        word_overlap = len(query_words.intersection(chunk_words))
+
+                        # Boost score if there's word overlap
+                        adjusted_score = similarity
+                        if word_overlap > 0:
+                            boost = (word_overlap / len(query_words)) * 0.2
+                            adjusted_score += boost
+
+                        results.append({
+                            'chunk': chunk_text,
+                            'metadata': self.document_metadata[idx],
+                            'score': float(adjusted_score),
+                            'similarity': float(similarity),
+                            'word_overlap': word_overlap
+                        })
+
+            # Sort by adjusted score
+            results.sort(key=lambda x: x['score'], reverse=True)
+            results = results[:top_k]
+
+            self.search_cache[cache_key] = results
+
+            if results:
+                scores = [r['score'] for r in results]
+                print(f"✅ Found {len(results)} relevant chunks with scores: {scores}")
+                for i, result in enumerate(results[:3]):
+                    print(f"   {i+1}. Score: {result['score']:.3f} | {result['chunk'][:100]}...")
+            else:
+                print(f"❌ No relevant chunks found for query: '{query}'")
+                print(f"📊 Total indexed chunks: {len(self.documents)}")
+
+                # Debug: Show top similarities even if below threshold
+                if len(similarities) > 0:
+                    max_sim = max(similarities)
+                    print(f"📊 Highest similarity found: {max_sim:.3f}")
+
+            return results
+
+        except Exception as e:
+            print(f"❌ Search error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
     def remove_document(self, filename):
+        """Enhanced document removal"""
         try:
             if filename not in self.document_files:
                 return False, "Document not found"
-            
+
             print(f"🗑️ Removing document: {filename}")
-            
+
             chunk_indices = set(self.document_files[filename]['chunk_indices'])
-            
+
             new_documents = []
             new_metadata = []
-            
+
             for i, (doc, meta) in enumerate(zip(self.documents, self.document_metadata)):
                 if i not in chunk_indices:
                     new_documents.append(doc)
@@ -469,19 +735,29 @@ class PolarisRAG:
                         **meta,
                         'chunk_id': len(new_documents) - 1
                     })
-            
+
+            # Rebuild the index
             if new_documents:
-                embeddings = self.encoder.encode(new_documents, batch_size=64, show_progress_bar=False)
-                embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-                
-                self.index = faiss.IndexFlatIP(self.dimension)
-                self.index.add(embeddings.astype('float32'))
+                embeddings = self.encoder.encode(
+                    new_documents, 
+                    batch_size=32, 
+                    show_progress_bar=False,
+                    convert_to_tensor=False
+                )
+                embeddings = embeddings.astype(np.float32)
+                norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+                norms[norms == 0] = 1
+                embeddings = embeddings / norms
+
+                self.index = faiss.IndexFlatL2(self.dimension)
+                self.index.add(embeddings)
             else:
-                self.index = faiss.IndexFlatIP(self.dimension)
-            
+                self.index = faiss.IndexFlatL2(self.dimension)
+
             self.documents = new_documents
             self.document_metadata = new_metadata
-            
+
+            # Update remaining file indices
             remaining_files = {}
             current_idx = 0
             for fname, finfo in self.document_files.items():
@@ -492,73 +768,45 @@ class PolarisRAG:
                         'chunk_indices': list(range(current_idx, current_idx + chunk_count))
                     }
                     current_idx += chunk_count
-            
+
             self.document_files = remaining_files
             self.search_cache.clear()
-            
+
             print(f"✅ Removed document: {filename}")
             return True, "Document removed successfully"
-            
+
         except Exception as e:
             print(f"❌ Document removal error: {e}")
             return False, str(e)
 
-    def search(self, query, top_k=3):
-        try:
-            cache_key = hashlib.md5(f"{query}_{top_k}".encode()).hexdigest()
-            if cache_key in self.search_cache:
-                print("⚡ Cache hit!")
-                return self.search_cache[cache_key]
-
-            if len(self.documents) == 0:
-                return []
-
-            query_embedding = self.encoder.encode([query], show_progress_bar=False)
-            query_embedding = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
-            
-            search_k = min(top_k, len(self.documents))
-            scores, indices = self.index.search(query_embedding.astype('float32'), search_k)
-            
-            results = []
-            for score, idx in zip(scores[0], indices[0]):
-                # Good threshold for finding relevant content
-                if idx < len(self.documents) and score > 0.3:
-                    results.append({
-                        'chunk': self.documents[idx],
-                        'metadata': self.document_metadata[idx],
-                        'score': float(score)
-                    })
-            
-            self.search_cache[cache_key] = results
-            print(f"🔍 Search results: {len(results)} chunks found with scores: {[r['score'] for r in results]}")
-            return results
-            
-        except Exception as e:
-            print(f"❌ Search error: {e}")
-            return []
-
     def get_document_list(self):
+        """Get list of uploaded documents with stats"""
         documents = []
         for filename, info in self.document_files.items():
             documents.append({
                 'filename': filename,
                 'chunk_count': info['chunk_count'],
-                'upload_time': info['upload_time']
+                'upload_time': info['upload_time'],
+                'total_chars': info.get('total_chars', 0),
+                'avg_chunk_length': info.get('avg_chunk_length', 0)
             })
         return documents
 
     def get_stats(self):
+        """Get detailed RAG system statistics"""
         return {
             'total_chunks': len(self.documents),
             'total_documents': len(self.document_files),
             'vector_dimension': self.dimension,
-            'cache_size': len(self.search_cache)
+            'cache_size': len(self.search_cache),
+            'index_size': self.index.ntotal if hasattr(self.index, 'ntotal') else 0,
+            'avg_chunk_length': sum(len(doc) for doc in self.documents) // len(self.documents) if self.documents else 0
         }
 
-# Initialize Polaris RAG
-rag_system = PolarisRAG()
+# Initialize FIXED RAG system
+rag_system = DocumentProcessor()
 
-# Session setup
+# Session setup with connection pooling
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Polaris-AI/1.0',
@@ -653,12 +901,12 @@ def start_bot_countdown():
                 'message': f"🧭 Polaris joining in {i} seconds..."
             })
             print(f"⏰ Polaris joining in {i} seconds...")
-            
+
             # Enable start button after 5 seconds
             if i == countdown_duration - 20:
                 socketio.emit('enable_start_button', {
                 })
-            
+
             time.sleep(1)
 
         if bot_startup_state['is_joining']:
@@ -689,7 +937,7 @@ async def send_greeting():
                 'voiceId': selected_voice_id,
                 'text': greeting_text,
                 'format': 'mp3',
-                'speed': 1.1,  # Or your speed/pitch logic
+                'speed': 1.1,
                 'pitch': 1.0,
                 'style': 'Conversational'
             }
@@ -747,23 +995,23 @@ async def send_greeting():
     except Exception as e:
         print(f"❌ Greeting error: {e}")
 
-class PolarisPipeline:
+class RAGOptimizedPipeline:
     def __init__(self):
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
     async def process_polaris_request(self, text):
-        """FIXED: Much better context-aware processing"""
+        """COMPLETELY FIXED: RAG-enhanced processing with proper document retrieval"""
         try:
-            # NEW: Check if muted
+            # Check if muted
             global polaris_muted
             if polaris_muted:
                 print(f"🔇 Polaris is muted - ignoring: {text}")
                 return
-                
+
             if not check_polaris_mention(text):
                 print(f"🚫 'Polaris' not found in first 3 words: {text}")
                 return
-            
+
             if not bot_startup_state['is_ready']:
                 print("🚫 Bot not ready - ignoring transcript")
                 return
@@ -779,16 +1027,16 @@ class PolarisPipeline:
                 'text': text
             })
 
-            # Step 1: RAG search
-            rag_task = asyncio.create_task(self.parallel_rag_search(text))
-            relevant_chunks = await rag_task
-            rag_time = time.time() - start_time
+            # Step 1: RAG search - CRITICAL FIX
+            rag_start = time.time()
+            relevant_chunks = await self.parallel_rag_search(text)
+            rag_time = time.time() - rag_start
 
             print(f"🔍 RAG search ({rag_time:.1f}s): Found {len(relevant_chunks)} chunks")
 
-            # Step 2: FIXED AI response with better context awareness
+            # Step 2: AI response with RAG context
             ai_start = time.time()
-            ai_response = await self.get_context_aware_response(text, relevant_chunks)
+            ai_response = await self.get_context_aware_response_with_rag(text, relevant_chunks)
             if not ai_response:
                 print("❌ No AI response")
                 return
@@ -811,7 +1059,8 @@ class PolarisPipeline:
                 'rag_chunks': len(relevant_chunks),
                 'mode': response_settings['mode'],
                 'rag_search_time': rag_time,
-                'memory_items': len(conversation_memory)
+                'memory_items': len(conversation_memory),
+                'rag_sources': list(set(chunk['metadata']['filename'] for chunk in relevant_chunks)) if relevant_chunks else []
             })
 
             # Step 3: TTS
@@ -842,7 +1091,8 @@ class PolarisPipeline:
                         'ai_time': ai_time,
                         'tts_time': step2_time,
                         'send_time': step3_time
-                    }
+                    },
+                    'rag_used': len(relevant_chunks) > 0
                 })
             else:
                 print("❌ Failed to send audio")
@@ -852,13 +1102,13 @@ class PolarisPipeline:
 
     async def parallel_rag_search(self, text):
         def search_task():
-            return rag_system.search(text, top_k=3)
+            return rag_system.search(text, top_k=5)  # Increased to 5 for better context
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self.executor, search_task)
 
-    async def get_context_aware_response(self, text, relevant_chunks):
-        """FIXED: Much better context-aware AI responses"""
+    async def get_context_aware_response_with_rag(self, text, relevant_chunks):
+        """COMPLETELY FIXED: Enhanced AI response with proper RAG integration"""
         try:
             def ai_call():
                 headers = {
@@ -868,7 +1118,7 @@ class PolarisPipeline:
 
                 # Build meeting context
                 meeting_context = f"You are Polaris, an AI meeting assistant currently participating in this meeting. "
-                
+
                 # Build memory context
                 memory_context = ""
                 if conversation_memory:
@@ -879,32 +1129,39 @@ class PolarisPipeline:
                         memory_context += f"{role}: {entry['text'][:60]}...\n"
                     memory_context += "\n"
 
-                # Build document context
+                # Build document context - CRITICAL FIX
                 context = ""
                 system_prompt = ""
-                
-                if response_settings['mode'] == 'rag' and relevant_chunks:
+
+                # Enhanced RAG context building
+                if relevant_chunks:
                     context = "Relevant information from uploaded documents:\n"
-                    for i, chunk in enumerate(relevant_chunks, 1):
-                        chunk_text = chunk['chunk'][:250]
+                    sources = set()
+                    for i, chunk in enumerate(relevant_chunks[:3], 1):  # Top 3 chunks
+                        chunk_text = chunk['chunk'][:300]  # More context
                         score = chunk['score']
-                        context += f"{i}. (Score: {score:.3f}) {chunk_text}...\n"
-                    context += "\n"
-                    
-                    system_prompt = f"{meeting_context}{memory_context}{context}You are in a meeting context. When participants mention you by name, respond helpfully. Use document information when relevant, but also apply your knowledge. Be conversational and helpful. Answer in 25-40 words."
-                    response_settings['max_tokens'] = 80
-                    
-                elif response_settings['mode'] == 'short':
-                    system_prompt = f"{meeting_context}{memory_context}You're in a meeting. Respond helpfully in 15-25 words."
-                    response_settings['max_tokens'] = 45
-                    
-                elif response_settings['mode'] == 'detailed':
-                    system_prompt = f"{meeting_context}{memory_context}You're in a meeting context. Respond helpfully and informatively in 30-45 words."
-                    response_settings['max_tokens'] = 85
-                    
-                elif response_settings['mode'] == 'internet':
-                    system_prompt = f"{meeting_context}{memory_context}You're in a meeting. Use your knowledge to respond helpfully in 25-40 words."
-                    response_settings['max_tokens'] = 80
+                        filename = chunk['metadata']['filename']
+                        sources.add(filename)
+                        context += f"{i}. From {filename} (Score: {score:.3f}): {chunk_text}...\n"
+                    context += f"\nSources: {', '.join(sources)}\n\n"
+
+                    if response_settings['mode'] == 'rag' or len(relevant_chunks) > 0:
+                        system_prompt = f"{meeting_context}{memory_context}{context}You are in a meeting context. When participants mention you by name, respond helpfully using the document information provided above when relevant. Be conversational and helpful. Answer in 25-45 words and reference the source when using document information."
+                        response_settings['max_tokens'] = 90
+                    else:
+                        system_prompt = f"{meeting_context}{memory_context}You're in a meeting context. Respond helpfully and informatively in 30-45 words."
+                        response_settings['max_tokens'] = 85
+                else:
+                    # No relevant documents found
+                    if response_settings['mode'] == 'short':
+                        system_prompt = f"{meeting_context}{memory_context}You're in a meeting. Respond helpfully in 15-25 words."
+                        response_settings['max_tokens'] = 45
+                    elif response_settings['mode'] == 'detailed':
+                        system_prompt = f"{meeting_context}{memory_context}You're in a meeting context. Respond helpfully and informatively in 30-45 words."
+                        response_settings['max_tokens'] = 85
+                    else:
+                        system_prompt = f"{meeting_context}{memory_context}You're in a meeting. Use your knowledge to respond helpfully in 25-40 words."
+                        response_settings['max_tokens'] = 80
 
                 payload = {
                     'model': 'llama3.1-8b',
@@ -927,22 +1184,22 @@ class PolarisPipeline:
                     'https://api.cerebras.ai/v1/chat/completions',
                     json=payload,
                     headers=headers,
-                    timeout=6
+                    timeout=8
                 )
 
                 if response.status_code == 200:
                     result = response.json()
                     full_response = result['choices'][0]['message']['content'].strip()
-                    
-                    # Don't reference external songs/bands when in meeting context
+
+                    # Don't reference external content in meeting context
                     if "65daysofstatic" in full_response or "song" in full_response.lower() or "album" in full_response.lower():
                         return "I'm here to help with your meeting. What can I assist you with?"
-                    
+
                     # Ensure proper endings
                     if not full_response.endswith(('.', '!', '?', ':')):
                         if len(full_response) > 10:
                             full_response += "."
-                    
+
                     return full_response
                 else:
                     print(f"❌ AI error: {response.status_code}")
@@ -972,7 +1229,7 @@ class PolarisPipeline:
                     'voiceId': selected_voice_id,
                     'text': text,
                     'format': 'mp3',
-                    'speed': 1.1,  # Or your speed/pitch logic
+                    'speed': 1.1,
                     'pitch': 1.0,
                     'style': 'Conversational'
                 }
@@ -981,7 +1238,7 @@ class PolarisPipeline:
                     'https://api.murf.ai/v1/speech/generate',
                     json=payload,
                     headers=headers,
-                    timeout=10
+                    timeout=12
                 )
 
                 if response.status_code == 200:
@@ -992,7 +1249,7 @@ class PolarisPipeline:
                     else:
                         result = response.json()
                         if 'audioFile' in result:
-                            audio_response = session.get(result['audioFile'], timeout=6)
+                            audio_response = session.get(result['audioFile'], timeout=8)
                             audio_data = audio_response.content
                         elif 'audioContent' in result:
                             audio_data = base64.b64decode(result['audioContent'])
@@ -1037,7 +1294,7 @@ class PolarisPipeline:
                     "b64_data": base64_audio_truncated
                 }
 
-                response = session.post(url, headers=headers, json=payload, timeout=6)
+                response = session.post(url, headers=headers, json=payload, timeout=8)
 
                 if response.status_code == 200:
                     return True
@@ -1053,18 +1310,18 @@ class PolarisPipeline:
             return False
 
 # Initialize pipeline
-pipeline = PolarisPipeline()
+pipeline = RAGOptimizedPipeline()
 
 def allowed_file(filename):
     ALLOWED_EXTENSIONS = {'txt', 'pdf', 'docx', 'doc'}
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# FIXED UI with mute/unmute button
+# COMPLETE UI with document management
 POLARIS_INTERFACE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Polaris AI</title>
+    <title>Polaris AI - RAG Enhanced</title>
     <meta charset="UTF-8">
     <style>
         body {
@@ -1097,13 +1354,13 @@ POLARIS_INTERFACE = """
             border: 2px solid rgba(255, 50, 200, 0.3);
             box-shadow: 0 20px 40px rgba(255, 0, 150, 0.2);
         }
-        
+
         .header {
             text-align: center;
             margin-bottom: 40px;
             position: relative;
         }
-        
+
         .polaris-star {
             font-size: 60px;
             color: #ff32c8;
@@ -1111,12 +1368,12 @@ POLARIS_INTERFACE = """
             text-shadow: 0 0 30px rgba(255, 50, 200, 0.8);
             animation: starGlow 3s ease-in-out infinite alternate;
         }
-        
+
         @keyframes starGlow {
             0% { text-shadow: 0 0 30px rgba(255, 50, 200, 0.8); }
             100% { text-shadow: 0 0 50px rgba(255, 50, 200, 1), 0 0 80px rgba(255, 0, 150, 0.6); }
         }
-        
+
         .brand {
             font-size: 48px;
             font-weight: bold;
@@ -1125,21 +1382,21 @@ POLARIS_INTERFACE = """
             margin-bottom: 15px;
             text-shadow: 0 0 30px rgba(255, 50, 200, 0.6);
         }
-        
+
         .subtitle {
             font-size: 18px;
             color: #ff96e6;
             margin-bottom: 10px;
             font-weight: 300;
         }
-        
+
         .powered-by {
             font-size: 14px;
             color: #d896e6;
             font-style: italic;
             opacity: 0.8;
         }
-        
+
         .polaris-note {
             background: linear-gradient(135deg, rgba(255, 50, 200, 0.15), rgba(200, 0, 150, 0.15));
             padding: 20px;
@@ -1149,12 +1406,12 @@ POLARIS_INTERFACE = """
             text-align: center;
             box-shadow: 0 10px 25px rgba(255, 50, 200, 0.1);
         }
-        
+
         .polaris-note strong {
             color: #ff32c8;
             font-size: 16px;
         }
-        
+
         .startup-panel {
             background: linear-gradient(135deg, rgba(255, 0, 150, 0.2), rgba(200, 0, 100, 0.2));
             padding: 30px;
@@ -1165,18 +1422,18 @@ POLARIS_INTERFACE = """
             display: none;
             box-shadow: 0 15px 30px rgba(255, 0, 150, 0.15);
         }
-        
+
         .startup-panel.active {
             display: block;
         }
-        
+
         .startup-panel h3 {
             color: #ff32c8;
             margin: 0 0 20px 0;
             font-size: 28px;
             text-shadow: 0 0 20px rgba(255, 50, 200, 0.6);
         }
-        
+
         .countdown-circle {
             width: 100px;
             height: 100px;
@@ -1186,12 +1443,12 @@ POLARIS_INTERFACE = """
             margin: 20px auto;
             animation: spin 2s linear infinite;
         }
-        
+
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        
+
         .countdown-number {
             font-size: 42px;
             font-weight: bold;
@@ -1199,13 +1456,13 @@ POLARIS_INTERFACE = """
             margin: 20px 0;
             text-shadow: 0 0 20px rgba(255, 50, 200, 0.8);
         }
-        
+
         .countdown-message {
             font-size: 16px;
             color: #ffb3e6;
             margin: 15px 0;
         }
-        
+
         button {
             background: linear-gradient(135deg, #ff32c8, #c800a0);
             color: white;
@@ -1221,7 +1478,7 @@ POLARIS_INTERFACE = """
             text-transform: uppercase;
             letter-spacing: 1px;
         }
-        
+
         #voice-select {
             width: 100%;
             padding: 12px;
@@ -1233,92 +1490,91 @@ POLARIS_INTERFACE = """
             outline: none;
             margin-top: 6px;
             transition: background-color 0.2s, box-shadow 0.2s;
-            appearance: none; /* remove default OS dropdown arrow */
+            appearance: none;
             cursor: pointer;
             border: 2px solid rgba(255, 50, 200, 0.3);
         }
-        
+
         button:hover {
             transform: translateY(-3px);
             box-shadow: 0 12px 30px rgba(255, 50, 200, 0.4);
             background: linear-gradient(135deg, #c800a0, #ff32c8);
         }
-        
+
         button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
             transform: none;
             background: #662d66;
         }
-        
+
         .start-bot-button {
             background: linear-gradient(135deg, #9932cc, #6a1b9a);
             box-shadow: 0 8px 20px rgba(153, 50, 204, 0.3);
             display: none;
         }
-        
+
         .start-bot-button.ready {
             display: inline-block;
         }
-        
+
         .start-bot-button:hover {
             background: linear-gradient(135deg, #6a1b9a, #9932cc);
             box-shadow: 0 12px 30px rgba(153, 50, 204, 0.4);
         }
-        
+
         .leave-bot-button {
             background: linear-gradient(135deg, #e91e63, #ad1457);
             box-shadow: 0 8px 20px rgba(233, 30, 99, 0.3);
             display: none;
         }
-        
+
         .leave-bot-button.ready {
             display: inline-block;
         }
-        
+
         .leave-bot-button:hover {
             background: linear-gradient(135deg, #ad1457, #e91e63);
             box-shadow: 0 12px 30px rgba(233, 30, 99, 0.4);
         }
-        
+
         .download-mom-button {
             background: linear-gradient(135deg, #8e24aa, #4a148c);
             box-shadow: 0 8px 20px rgba(142, 36, 170, 0.3);
             display: none;
         }
-        
+
         .download-mom-button.ready {
             display: inline-block;
         }
-        
+
         .download-mom-button:hover {
             background: linear-gradient(135deg, #4a148c, #8e24aa);
             box-shadow: 0 12px 30px rgba(142, 36, 170, 0.4);
         }
-        
-        /* NEW: Mute/Unmute button styles */
+
         .mute-button {
             background: linear-gradient(135deg, #ff1493, #c71585);
             box-shadow: 0 8px 20px rgba(255, 20, 147, 0.3);
             font-size: 18px;
             padding: 12px 25px;
         }
-        
+
         .mute-button.muted {
             background: linear-gradient(135deg, #666, #888);
             box-shadow: 0 8px 20px rgba(102, 102, 102, 0.3);
         }
-        
+
         .mute-button:hover {
             background: linear-gradient(135deg, #c71585, #ff1493);
             box-shadow: 0 12px 30px rgba(255, 20, 147, 0.4);
         }
-        
+
         .mute-button.muted:hover {
             background: linear-gradient(135deg, #888, #666);
             box-shadow: 0 12px 30px rgba(102, 102, 102, 0.4);
         }
-        
+
         .delete-btn {
             background: linear-gradient(135deg, #e91e63, #ad1457);
             padding: 5px 10px;
@@ -1327,11 +1583,11 @@ POLARIS_INTERFACE = """
             text-transform: none;
             letter-spacing: 0;
         }
-        
+
         .delete-btn:hover {
             background: linear-gradient(135deg, #ad1457, #e91e63);
         }
-        
+
         input[type="url"], input[type="text"] {
             width: 100%;
             padding: 15px 20px;
@@ -1344,18 +1600,18 @@ POLARIS_INTERFACE = """
             margin: 10px 0;
             transition: all 0.3s ease;
         }
-        
+
         input[type="url"]:focus, input[type="text"]:focus {
             outline: none;
             border-color: #ff32c8;
             box-shadow: 0 0 20px rgba(255, 50, 200, 0.4);
             background: rgba(60, 0, 100, 0.5);
         }
-        
+
         input[type="url"]::placeholder, input[type="text"]::placeholder {
             color: rgba(255, 150, 230, 0.6);
         }
-        
+
         .mode-selector {
             display: flex;
             justify-content: center;
@@ -1363,7 +1619,7 @@ POLARIS_INTERFACE = """
             gap: 15px;
             flex-wrap: wrap;
         }
-        
+
         .mode-btn {
             background: rgba(255, 50, 200, 0.2);
             color: #ff96e6;
@@ -1377,14 +1633,14 @@ POLARIS_INTERFACE = """
             letter-spacing: 1px;
             font-weight: 500;
         }
-        
+
         .mode-btn:hover, .mode-btn.active {
             background: rgba(255, 50, 200, 0.3);
             border-color: #ff32c8;
             color: #ff32c8;
             box-shadow: 0 0 15px rgba(255, 50, 200, 0.3);
         }
-        
+
         .upload-area {
             border: 3px dashed rgba(255, 50, 200, 0.4);
             border-radius: 15px;
@@ -1395,22 +1651,22 @@ POLARIS_INTERFACE = """
             transition: all 0.3s ease;
             background: rgba(255, 50, 200, 0.05);
         }
-        
+
         .upload-area:hover {
             border-color: #ff32c8;
             background: rgba(255, 50, 200, 0.1);
             box-shadow: 0 0 30px rgba(255, 50, 200, 0.2);
         }
-        
+
         .upload-area.dragover {
             border-color: #9932cc;
             background: rgba(153, 50, 204, 0.1);
         }
-        
+
         .file-input {
             display: none;
         }
-        
+
         .document-list {
             margin-top: 20px;
             max-height: 200px;
@@ -1419,7 +1675,7 @@ POLARIS_INTERFACE = """
             border-radius: 10px;
             padding: 15px;
         }
-        
+
         .document-item {
             display: flex;
             justify-content: space-between;
@@ -1430,30 +1686,30 @@ POLARIS_INTERFACE = """
             border-radius: 8px;
             border-left: 3px solid #ff32c8;
         }
-        
+
         .document-info {
             flex-grow: 1;
         }
-        
+
         .document-name {
             font-weight: bold;
             color: #ff32c8;
             font-size: 14px;
         }
-        
+
         .document-details {
             font-size: 11px;
             color: #ff96e6;
             margin-top: 2px;
         }
-        
+
         .grid-2 {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 30px;
             margin: 30px 0;
         }
-        
+
         .card {
             background: rgba(60, 0, 100, 0.3);
             padding: 25px;
@@ -1462,26 +1718,26 @@ POLARIS_INTERFACE = """
             backdrop-filter: blur(10px);
             transition: all 0.3s ease;
         }
-        
+
         .card:hover {
             border-color: rgba(255, 50, 200, 0.4);
             box-shadow: 0 10px 30px rgba(255, 50, 200, 0.1);
         }
-        
+
         .card h3 {
             color: #ff32c8;
             margin-top: 0;
             font-size: 20px;
             text-shadow: 0 0 10px rgba(255, 50, 200, 0.5);
         }
-        
+
         .status-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
             gap: 20px;
             margin: 25px 0;
         }
-        
+
         .status-item {
             display: flex;
             justify-content: space-between;
@@ -1492,7 +1748,7 @@ POLARIS_INTERFACE = """
             border-left: 4px solid #ff32c8;
             color: #ff96e6;
         }
-        
+
         .status-indicator {
             width: 14px;
             height: 14px;
@@ -1500,49 +1756,19 @@ POLARIS_INTERFACE = """
             margin-left: 10px;
             animation: pulse 2s infinite;
         }
-        
+
         @keyframes pulse {
             0% { opacity: 1; }
             50% { opacity: 0.5; }
             100% { opacity: 1; }
         }
-        
+
         .status-ready { background: #9932cc; }
         .status-active { background: #ff32c8; }
         .status-connecting { background: #ff1493; }
         .status-error { background: #e91e63; }
         .status-muted { background: #666; }
-        
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 20px;
-            margin: 25px 0;
-        }
-        
-        .metric-card {
-            background: rgba(60, 0, 100, 0.4);
-            padding: 20px;
-            border-radius: 15px;
-            text-align: center;
-            border: 1px solid rgba(255, 50, 200, 0.2);
-        }
-        
-        .metric-value {
-            font-size: 28px;
-            font-weight: bold;
-            color: #ff32c8;
-            text-shadow: 0 0 15px rgba(255, 50, 200, 0.6);
-            margin-bottom: 5px;
-        }
-        
-        .metric-label {
-            font-size: 12px;
-            color: #ff96e6;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        
+
         .log-panel {
             background: rgba(20, 0, 40, 0.8);
             padding: 25px;
@@ -1554,46 +1780,51 @@ POLARIS_INTERFACE = """
             font-size: 13px;
             border: 1px solid rgba(255, 50, 200, 0.2);
         }
-        
+
         .log-entry {
             margin: 8px 0;
             padding: 5px 0;
             border-bottom: 1px solid rgba(255, 50, 200, 0.1);
             color: #ff96e6;
         }
-        
+
         .log-entry:last-child {
             border-bottom: none;
         }
-        
+
         .log-transcript {
             color: #ffb3e6;
             font-style: italic;
         }
-        
+
         .log-polaris {
             color: #9932cc;
             font-weight: bold;
         }
-        
+
         .log-ai {
             color: #ff1493;
         }
-        
+
+        .log-rag {
+            color: #00ff88;
+            font-weight: bold;
+        }
+
         .log-memory {
             color: #e91e63;
         }
-        
+
         .log-mom {
             color: #8e24aa;
             font-weight: bold;
         }
-        
+
         .log-mute {
             color: #ff1493;
             font-weight: bold;
         }
-        
+
         @media (max-width: 768px) {
             .container { padding: 20px; }
             .grid-2 { grid-template-columns: 1fr; }
@@ -1607,9 +1838,10 @@ POLARIS_INTERFACE = """
     <div class="container">
         <div class="header">
             <div class="brand">POLARIS</div>
-            <div class="subtitle">RAG-Powered AI Meeting Assistant</div>
-            <div class="powered-by">🎯 Powered By : Murf AI, Cerebras, and Recall.ai </div>
+            <div class="subtitle">RAG-Enhanced AI Meeting Assistant</div>
+            <div class="powered-by">🎯 Powered By: Murf AI, Cerebras, Recall.ai + RAG System</div>
         </div>
+
         <div class="polaris-note">
             <div class="input-group">
                 <label class="subtitle">Assistant Voice: </label>
@@ -1618,12 +1850,14 @@ POLARIS_INTERFACE = """
                 </select>
             </div>
         </div>
-        <!-- NEW: Mute/Unmute Button -->
+
+        <!-- Mute/Unmute Button -->
         <div style="text-align: center; margin: 20px 0;">
             <button class="mute-button" id="mute-button" onclick="toggleMute()">
                 🔊 POLARIS ACTIVE
             </button>
         </div>
+
         <!-- Startup Panel -->
         <div class="startup-panel" id="startup-panel">
             <h3>🧭 Polaris Initialization</h3>
@@ -1637,6 +1871,7 @@ POLARIS_INTERFACE = """
                 🚪 Leave Meeting
             </button>
         </div>
+
         <!-- Response Mode Selector -->
         <div class="mode-selector">
             <button class="mode-btn active" data-mode="detailed" onclick="setMode('detailed')">🔍 Detailed</button>
@@ -1644,6 +1879,7 @@ POLARIS_INTERFACE = """
             <button class="mode-btn" data-mode="rag" onclick="setMode('rag')">📚 Document</button>
             <button class="mode-btn" data-mode="internet" onclick="setMode('internet')">🌐 General</button>
         </div>
+
         <div class="grid-2">
             <!-- Meeting Controls -->
             <div class="card">
@@ -1662,31 +1898,35 @@ POLARIS_INTERFACE = """
                     </button>
                 </div>
             </div>
-            <!-- Document Upload with Management -->
+
+            <!-- Enhanced Document Upload with Management -->
             <div class="card">
-                <h3>📚 Document Management</h3>
+                <h3>📚 RAG Document Management</h3>
                 <div class="upload-area" onclick="document.getElementById('file-input').click()">
                     <div style="font-size: 24px; margin-bottom: 10px;">📁</div>
-                    <div style="color: white;"><strong>Upload relevant documents for the meeting</strong></div>
+                    <div style="color: white;"><strong>Upload documents for RAG context</strong></div>
                     <div style="font-size: 12px; color: #d896e6; margin-top: 8px;">
-                        Supports: PDF, DOCX, TXT (Max 16MB)
+                        Supports: PDF, DOCX, TXT (Max 16MB)<br>
+                        Documents will be used to answer questions contextually
                     </div>
                     <input type="file" id="file-input" class="file-input" multiple accept=".pdf,.docx,.doc,.txt">
                 </div>
-                
+
                 <div class="document-list" id="document-list" style="display: none;">
                     <h4 style="color: #ff32c8; margin: 0 0 15px 0;">📋 Uploaded Documents:</h4>
                     <div id="document-items"></div>
                 </div>
-                
+
                 <div style="text-align: center; margin-top: 15px;">
                     <span style="font-size: 14px; color: #ff96e6;">
                         Documents: <span id="doc-count">0</span> | 
-                        Chunks: <span id="chunk-count">0</span>
+                        Chunks: <span id="chunk-count">0</span> |
+                        RAG Status: <span id="rag-status" style="color: #00ff88;">Ready</span>
                     </span>
                 </div>
             </div>
         </div>
+
         <!-- System Status -->
         <div class="card">
             <h3>📊 System Status</h3>
@@ -1708,8 +1948,8 @@ POLARIS_INTERFACE = """
                 <div class="status-item">
                     <span>RAG System</span>
                     <span>
-                        <span id="rag-status">Ready</span>
-                        <span class="status-indicator status-ready" id="rag-indicator"></span>
+                        <span id="rag-system-status">Ready</span>
+                        <span class="status-indicator status-ready" id="rag-system-indicator"></span>
                     </span>
                 </div>
                 <div class="status-item">
@@ -1728,54 +1968,42 @@ POLARIS_INTERFACE = """
                 </div>
             </div>
         </div>
-        <!-- Activity Log -->
+
+        <!-- Enhanced Activity Log -->
         <div class="card">
-            <h3>📋 Live Meeting Transcript & Activity Log</h3>
+            <h3>📋 Live Meeting Transcript & RAG Activity Log</h3>
             <div class="log-panel" id="log-panel">
-                <div class="log-entry">Started Polaris AI.</div>
+                <div class="log-entry">🧭 Polaris RAG-Enhanced AI Meeting Assistant Started</div>
+                <div class="log-entry log-rag">📚 RAG system initialized and ready for document uploads</div>
             </div>
         </div>
     </div>
+
     <script>
         const socket = io();
         let uploadedDocs = [];
         let currentMode = 'detailed';
         let momFilename = null;
         let polarisIsMuted = false;
+
         function updateStatus(type, status, indicator) {
             document.getElementById(type + '-status').textContent = status;
             document.getElementById(type + '-indicator').className = 'status-indicator ' + indicator;
         }
-        function updateMetric(id, value) {
-            const element = document.getElementById(id);
-            if (element) {
-                if (typeof value === 'number') {
-                    element.textContent = value.toFixed(2);
-                    if (id === 'total-time') {
-                        if (value <= 6) {
-                            element.style.color = '#9932cc';
-                        } else if (value <= 8) {
-                            element.style.color = '#ff1493';
-                        } else {
-                            element.style.color = '#e91e63';
-                        }
-                    }
-                } else {
-                    element.textContent = value;
-                }
-            }
-        }
+
         function addLog(message, type = 'info') {
             const logPanel = document.getElementById('log-panel');
             const logEntry = document.createElement('div');
             logEntry.className = 'log-entry';
-            
+
             if (type === 'transcript') {
                 logEntry.classList.add('log-transcript');
             } else if (type === 'polaris') {
                 logEntry.classList.add('log-polaris');
             } else if (type === 'ai') {
                 logEntry.classList.add('log-ai');
+            } else if (type === 'rag') {
+                logEntry.classList.add('log-rag');
             } else if (type === 'memory') {
                 logEntry.classList.add('log-memory');
             } else if (type === 'mom') {
@@ -1783,18 +2011,19 @@ POLARIS_INTERFACE = """
             } else if (type === 'mute') {
                 logEntry.classList.add('log-mute');
             }
-            
+
             logEntry.textContent = new Date().toLocaleTimeString() + ' - ' + message;
             logPanel.appendChild(logEntry);
             logPanel.scrollTop = logPanel.scrollHeight;
         }
-        // NEW: Mute/Unmute functionality
+
+        // Mute/Unmute functionality
         function toggleMute() {
             polarisIsMuted = !polarisIsMuted;
             const muteButton = document.getElementById('mute-button');
             const muteStatus = document.getElementById('mute-status');
             const muteIndicator = document.getElementById('mute-indicator');
-            
+
             if (polarisIsMuted) {
                 muteButton.textContent = '🔇 POLARIS MUTED';
                 muteButton.classList.add('muted');
@@ -1808,10 +2037,10 @@ POLARIS_INTERFACE = """
                 muteIndicator.className = 'status-indicator status-active';
                 addLog('🔊 Polaris responses enabled - will respond to "Polaris" mentions', 'mute');
             }
-            
-            // Send mute state to server
+
             socket.emit('set_mute_state', { muted: polarisIsMuted });
         }
+
         function setMode(mode) {
             currentMode = mode;
             document.querySelectorAll('.mode-btn').forEach(btn => {
@@ -1819,35 +2048,40 @@ POLARIS_INTERFACE = """
             });
             document.querySelector(`[data-mode="${mode}"]`).classList.add('active');
             document.getElementById('current-mode').textContent = mode.charAt(0).toUpperCase() + mode.slice(1);
-            
+
             socket.emit('set_response_mode', { mode: mode });
             addLog(`Response mode changed to: ${mode}`);
         }
+
         function showStartupSequence() {
             document.getElementById('startup-panel').classList.add('active');
             document.getElementById('leave-bot-button').classList.add('ready');
             document.getElementById('leave-meeting-btn').classList.add('ready');
             updateStatus('bot', 'Joining...', 'status-connecting');
         }
+
         function hideStartupSequence() {
             document.getElementById('startup-panel').classList.remove('active');
         }
+
         function startBot() {
             updateStatus('bot', 'Active', 'status-active');
             hideStartupSequence();
             socket.emit('start_bot_manual');
         }
+
         function leaveBot() {
             if (confirm('Are you sure you want Polaris to leave the meeting? This will generate professional MOM.')) {
                 socket.emit('leave_bot');
             }
         }
+
         function downloadMOM() {
             if (!momFilename) {
                 alert('No Meeting Minutes available for download yet.');
                 return;
             }
-            
+
             const downloadUrl = `/download_mom/${momFilename}`;
             const link = document.createElement('a');
             link.href = downloadUrl;
@@ -1856,21 +2090,22 @@ POLARIS_INTERFACE = """
             link.click();
             document.body.removeChild(link);
         }
+
         function updateDocumentList(documents) {
             const documentList = document.getElementById('document-list');
             const documentItems = document.getElementById('document-items');
-            
+
             if (documents.length > 0) {
                 documentList.style.display = 'block';
                 documentItems.innerHTML = '';
-                
+
                 documents.forEach(doc => {
                     const docItem = document.createElement('div');
                     docItem.className = 'document-item';
                     docItem.innerHTML = `
                         <div class="document-info">
                             <div class="document-name">📄 ${doc.filename}</div>
-                            <div class="document-details">${doc.chunk_count} chunks • Uploaded: ${new Date(doc.upload_time).toLocaleTimeString()}</div>
+                            <div class="document-details">${doc.chunk_count} chunks • ${doc.total_chars} chars • Uploaded: ${new Date(doc.upload_time).toLocaleTimeString()}</div>
                         </div>
                         <button class="delete-btn" onclick="removeDocument('${doc.filename}')">
                             ✖ Delete
@@ -1882,34 +2117,41 @@ POLARIS_INTERFACE = """
                 documentList.style.display = 'none';
             }
         }
+
         function removeDocument(filename) {
-            if (confirm(`Are you sure you want to remove "${filename}" from context?`)) {
-                addLog(`🗑️ Removing document: ${filename}`);
+            if (confirm(`Are you sure you want to remove "${filename}" from RAG context?`)) {
+                addLog(`🗑️ Removing document from RAG: ${filename}`, 'rag');
                 socket.emit('remove_document', { filename: filename });
             }
         }
-        // File upload handling
+
+        // Enhanced file upload handling
         document.getElementById('file-input').addEventListener('change', function(e) {
             uploadFiles(e.target.files);
         });
+
         const uploadArea = document.querySelector('.upload-area');
         uploadArea.addEventListener('dragover', function(e) {
             e.preventDefault();
             uploadArea.classList.add('dragover');
         });
+
         uploadArea.addEventListener('dragleave', function(e) {
             uploadArea.classList.remove('dragover');
         });
+
         uploadArea.addEventListener('drop', function(e) {
             e.preventDefault();
             uploadArea.classList.remove('dragover');
             uploadFiles(e.dataTransfer.files);
         });
+
         function uploadFiles(files) {
             Array.from(files).forEach(file => {
                 const formData = new FormData();
                 formData.append('file', file);
-                addLog('📤 Processing: ' + file.name);
+                addLog('📤 Processing for RAG: ' + file.name, 'rag');
+
                 fetch('/upload', {
                     method: 'POST',
                     body: formData
@@ -1917,26 +2159,30 @@ POLARIS_INTERFACE = """
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        addLog('✅ Processed: ' + file.name + ' (' + data.chunks + ' chunks)');
+                        addLog(`✅ Added to RAG: ${file.name} (${data.chunks} chunks)`, 'rag');
                         updateDocumentStats();
                         socket.emit('get_document_list');
+                        updateStatus('rag-system', 'Active', 'status-active');
                     } else {
-                        addLog('❌ Failed to process: ' + file.name);
+                        addLog(`❌ Failed to process for RAG: ${file.name}`, 'rag');
                     }
                 })
                 .catch(error => {
-                    addLog('❌ Upload error: ' + error);
+                    addLog(`❌ Upload error: ${error}`, 'rag');
                 });
             });
         }
+
         function updateDocumentStats() {
             socket.emit('get_rag_stats');
         }
+
         function startTunnel() {
             updateStatus('tunnel', 'Starting...', 'status-connecting');
             addLog('Starting secure tunnel...');
             socket.emit('start_tunnel');
         }
+
         function joinMeeting() {
             const meetingUrl = document.getElementById('meeting-url').value.trim();
             if (!meetingUrl) {
@@ -1944,24 +2190,28 @@ POLARIS_INTERFACE = """
                 return;
             }
             updateStatus('bot', 'Creating...', 'status-connecting');
-            addLog('Creating Polaris bot...');
+            addLog('Creating RAG-enhanced Polaris bot...');
             socket.emit('join_meeting', { meetingUrl: meetingUrl });
         }
+
         // Socket event handlers
         socket.on('tunnel_ready', function(data) {
             updateStatus('tunnel', 'Connected', 'status-active');
             document.getElementById('join-btn').disabled = false;
             addLog('Tunnel connection established');
         });
+
         socket.on('bot_created', function(data) {
             updateStatus('bot', 'Created', 'status-active');
-            addLog('🧭 Polaris bot created: ' + data.botId);
+            addLog('🧭 RAG-enhanced Polaris bot created: ' + data.botId);
             showStartupSequence();
         });
+
         socket.on('bot_error', function(data) {
             updateStatus('bot', 'Error', 'status-error');
             addLog('❌ Bot error: ' + data.error);
         });
+
         socket.on('bot_left', function(data) {
             updateStatus('bot', 'Left Meeting', 'status-ready');
             document.getElementById('leave-bot-button').classList.remove('ready');
@@ -1969,28 +2219,34 @@ POLARIS_INTERFACE = """
             addLog('🚪 ' + data.message, 'mom');
             hideStartupSequence();
         });
+
         socket.on('bot_leave_error', function(data) {
             updateStatus('bot', 'Leave Failed', 'status-error');
             addLog('❌ Leave failed: ' + data.error);
         });
+
         socket.on('mom_generated', function(data) {
             addLog('📝 ' + data.message, 'mom');
             addLog('📄 MOM generated successfully!', 'mom');
-            
+
             momFilename = data.pdf_filename;
             document.getElementById('download-mom-btn').classList.add('ready');
         });
+
         socket.on('transcript_received', function(data) {
             addLog('📝 Transcript: ' + data.text, 'transcript');
         });
+
         socket.on('countdown_update', function(data) {
             document.getElementById('countdown-number').textContent = data.seconds_remaining;
             document.getElementById('countdown-message').textContent = data.message;
         });
+
         socket.on('enable_start_button', function(data) {
             document.getElementById('start-bot-button').classList.add('ready');
-            addLog('🚀 ' + data.message);
+            addLog('🚀 Polaris ready to start');
         });
+
         socket.on('countdown_complete', function(data) {
             document.getElementById('countdown-circle').style.display = 'none';
             document.getElementById('countdown-number').textContent = '✅';
@@ -1998,49 +2254,70 @@ POLARIS_INTERFACE = """
             document.getElementById('start-bot-button').classList.add('ready');
             updateStatus('bot', 'Ready', 'status-ready');
         });
+
         socket.on('greeting_sent', function(data) {
-            addLog('🎉 ' + data.message);
-            updateStatus('rag', 'Active', 'status-active');
+            addLog('🎉 Polaris greeting sent - RAG system active');
+            updateStatus('rag-system', 'Active', 'status-active');
         });
+
         socket.on('ai_response', function(data) {
-            addLog('🧠 AI (' + data.mode + '): ' + data.ai_response, 'ai');
-            updateMetric('rag-time', data.rag_search_time);
-            updateMetric('rag-chunks', data.rag_chunks);
-            
+            let ragInfo = '';
+            if (data.rag_chunks > 0) {
+                ragInfo = ` [RAG: ${data.rag_chunks} chunks`;
+                if (data.rag_sources && data.rag_sources.length > 0) {
+                    ragInfo += ` from ${data.rag_sources.join(', ')}`;
+                }
+                ragInfo += ']';
+            }
+
+            addLog(`🧠 AI (${data.mode}): ${data.ai_response}${ragInfo}`, data.rag_chunks > 0 ? 'rag' : 'ai');
+
             if (data.memory_items) {
-                addLog('🧠 Memory updated: ' + data.memory_items + ' items', 'memory');
+                addLog(`🧠 Memory updated: ${data.memory_items} items`, 'memory');
             }
         });
+
         socket.on('audio_sent', function(data) {
-            updateStatus('rag', 'Ready', 'status-ready');
-            
-            const breakdown = data.breakdown;
-            updateMetric('total-time', data.total_time);
-            updateMetric('ai-time', breakdown.ai_time);
-            updateMetric('tts-time', breakdown.tts_time);
-            
+            updateStatus('rag-system', 'Ready', 'status-ready');
+
+            const ragUsed = data.rag_used ? ' (RAG Enhanced)' : '';
         });
+
         socket.on('document_list', function(data) {
             updateDocumentList(data.documents);
         });
+
         socket.on('document_removed', function(data) {
-            addLog('✅ Removed: ' + data.filename);
+            addLog(`✅ Removed from RAG: ${data.filename}`, 'rag');
             updateDocumentStats();
             socket.emit('get_document_list');
         });
+
         socket.on('document_remove_error', function(data) {
-            addLog('❌ Remove failed: ' + data.error);
+            addLog(`❌ Remove failed: ${data.error}`, 'rag');
         });
+
         socket.on('rag_stats', function(data) {
             document.getElementById('doc-count').textContent = data.stats.total_documents;
             document.getElementById('chunk-count').textContent = data.stats.total_chunks;
+
+            if (data.stats.total_chunks > 0) {
+                document.getElementById('rag-status').textContent = 'Active';
+                document.getElementById('rag-status').style.color = '#00ff88';
+            } else {
+                document.getElementById('rag-status').textContent = 'Ready';
+                document.getElementById('rag-status').style.color = '#ff96e6';
+            }
         });
+
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
-            updateStatus('rag', 'Ready', 'status-ready');
+            updateStatus('rag-system', 'Ready', 'status-ready');
             socket.emit('get_document_list');
             socket.emit('get_rag_stats');
         });
+
+        // API key management
         document.addEventListener("DOMContentLoaded", function() {
             fetch("/get_api_keys")
                 .then(res => res.json())
@@ -2067,7 +2344,8 @@ POLARIS_INTERFACE = """
                     }
                 });
         });
-        // On page load, populate voice options
+
+        // Voice options population
         document.addEventListener("DOMContentLoaded", function() {
             const voiceSelect = document.getElementById('voice-select');
             const voices = [
@@ -2094,6 +2372,7 @@ POLARIS_INTERFACE = """
                 voiceSelect.appendChild(opt);
             });
         });
+
         function changeVoice() {
             const selected = document.getElementById('voice-select').value;
             socket.emit('set_voice', { voiceId: selected });
@@ -2137,7 +2416,7 @@ def upload_file():
             chunks = rag_system.process_txt(filepath)
 
         processing_time = time.time() - start_time
-        print(f"📁 Processing time: {processing_time:.2f}s for {len(chunks)} chunks")
+        print(f"📁 RAG processing time: {processing_time:.2f}s for {len(chunks)} chunks")
 
         if chunks:
             success = rag_system.add_document(filename, chunks)
@@ -2151,7 +2430,7 @@ def upload_file():
                     'stats': stats
                 })
 
-        return jsonify({'success': False, 'error': 'Failed to process document'})
+        return jsonify({'success': False, 'error': 'Failed to process document for RAG'})
 
     except Exception as e:
         print(f"❌ Upload error: {e}")
@@ -2169,7 +2448,7 @@ def download_mom(filename):
         print(f"❌ Download error: {e}")
         return jsonify({'error': str(e)}), 500
 
-# COMPLETE SENTENCE AGGREGATION
+# Enhanced webhook with better transcript handling
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global transcript_buffer, last_update_time, sentence_timeout_handle, full_meeting_transcript
@@ -2229,13 +2508,14 @@ def webhook():
 def set_voice():
     global selected_voice_id
     data = request.json
-    vid = data.get('voice_id', 'en-US-natalie')
-    # Optional: Validate against allowed voices
+    vid = data.get('voice_id', 'en-US-marcus')
+
     voice_dict = dict(voice_options)
     if vid not in voice_dict.values():
         return jsonify({'success': False, 'error': 'Invalid voice'})
+
     selected_voice_id = vid
-    # Find readable name
+
     for name, value in voice_options:
         if value == vid:
             return jsonify({'success': True, 'voice_id': vid, 'voice_name': name})
@@ -2246,11 +2526,11 @@ def finalize_and_emit_transcript():
 
     if transcript_buffer.strip():
         complete_sentence = transcript_buffer.strip()
-        
+
         print(f"📝 Complete sentence: {complete_sentence}")
-        
+
         socketio.emit('transcript_received', {'text': complete_sentence})
-        
+
         full_meeting_transcript.append({
             'timestamp': datetime.now().isoformat(),
             'text': complete_sentence
@@ -2312,11 +2592,11 @@ def handle_join_meeting(data):
 
         if bot_id:
             current_bot_id = bot_id
-            print(f"✅ Polaris bot ready: {current_bot_id}")
+            print(f"✅ RAG-enhanced Polaris bot ready: {current_bot_id}")
             socketio.emit('bot_created', {
                 'success': True,
                 'botId': current_bot_id,
-                'message': 'Polaris bot created!'
+                'message': 'RAG-enhanced Polaris bot created!'
             })
             start_bot_countdown()
         else:
@@ -2336,7 +2616,7 @@ def handle_start_bot_manual():
     bot_startup_state['is_joining'] = False
     bot_startup_state['is_ready'] = True
 
-    print("🚀 Polaris manually started!")
+    print("🚀 RAG-enhanced Polaris manually started!")
 
     def send_greeting_async():
         loop = asyncio.new_event_loop()
@@ -2354,7 +2634,7 @@ def handle_leave_bot():
             socketio.emit('bot_left', {'message': message})
         else:
             socketio.emit('bot_leave_error', {'error': message})
-    
+
     threading.Thread(target=leave_bot_thread, daemon=True).start()
 
 @socketio.on('set_response_mode')
@@ -2363,7 +2643,6 @@ def handle_set_response_mode(data):
     response_settings['mode'] = mode
     print(f"🔄 Response mode changed to: {mode}")
 
-# NEW: Mute/Unmute handler
 @socketio.on('set_mute_state')
 def handle_set_mute_state(data):
     global polaris_muted
@@ -2372,7 +2651,7 @@ def handle_set_mute_state(data):
     status = "muted" if muted else "active"
     print(f"🔇 Polaris {status}")
 
-# Document management socket handlers
+# RAG document management socket handlers
 @socketio.on('get_document_list')
 def handle_get_document_list():
     documents = rag_system.get_document_list()
@@ -2402,31 +2681,36 @@ def handle_set_voice(data):
         print(f"🎤 Voice changed to: {selected_voice_id}")
         emit("voice_changed", {"voiceId": selected_voice_id}, broadcast=True)
 
-
 @app.route('/health')
 def health():
     return jsonify({
         'status': 'healthy',
-        'mode': 'Polaris_CONTEXT_AWARE_FIXED',
-        'target_latency': '5_6_seconds',
-        'response_words': '25_40',
+        'mode': 'Polaris_RAG_ENHANCED_FIXED',
+        'target_latency': '4_6_seconds',
+        'response_words': '25_45',
         'bot': 'active' if current_bot_id else 'inactive',
         'bot_ready': bot_startup_state['is_ready'],
         'muted': polaris_muted,
         'memory_items': len(conversation_memory),
         'transcript_entries': len(full_meeting_transcript),
         'mom_file': generated_mom_file,
+        'rag_stats': rag_system.get_stats(),
         'features': {
-            'context_awareness_FIXED': True,
+            'rag_enhanced': True,
+            'document_processing': True,
+            'semantic_search': True,
+            'context_awareness': True,
             'meeting_context_prompts': True,
-            'no_external_references': True,
             'mute_unmute_control': True,
             'better_memory': True,
-            'random_countdown': '16_19_seconds'
+            'random_countdown': '16_19_seconds',
+            'faiss_l2_index': True,
+            'cosine_similarity': True,
+            'lowered_threshold': True
         }
     })
 
 if __name__ == '__main__':
-    print("🧭 POLARIS AI - STARTED AT http://localhost:5013/")
+    print("🧭 POLARIS RAG-ENHANCED AI - STARTED AT http://localhost:5013/")
     print("=" * 80)
     socketio.run(app, host='0.0.0.0', port=5013, debug=False)
