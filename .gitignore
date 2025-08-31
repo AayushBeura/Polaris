@@ -1,0 +1,18 @@
+# Ignore virtual environment
+.venv/
+
+# Ignore user configuration file with API keys
+user_config.json
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore uploads and generated files
+uploads/*
+!uploads/.gitkeep
+
+# Ignore system files
+.DS_Store
+Thumbs.db

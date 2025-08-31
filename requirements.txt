@@ -1,0 +1,12 @@
+flask
+flask-socketio
+requests
+python-dotenv
+pyngrok
+PyPDF2
+python-docx
+numpy
+sentence-transformers
+faiss-cpu
+werkzeug
+fpdf
